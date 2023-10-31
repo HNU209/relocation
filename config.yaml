@@ -1,0 +1,21 @@
+place_name: '대전, 대한민국'
+unit: 'm'
+unit_size: 1000
+
+algo: 'ga'
+verbose: False
+
+generate_data: False
+use_random_data: True
+
+n_taxi_point: 300
+n_passenger_point: 5000
+
+start_time: 0
+end_time: 180
+max_steps_per_episode: 1440
+
+relocation_timing: 30
+num_generation: 500
+population_size: 300
+mutation_rate: 0.01
