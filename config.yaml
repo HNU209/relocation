@@ -3,10 +3,10 @@ unit: 'm'
 unit_size: 1000
 
 algo: 'ga'
-verbose: False
+verbose: false
 
-generate_data: False
-use_random_data: True
+generate_data: true
+use_random_data: true
 
 n_taxi_point: 300
 n_passenger_point: 5000

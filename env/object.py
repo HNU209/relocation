@@ -27,6 +27,9 @@ class Vehicle:
         
         self.assigned_passenger_id = None
         self.relocation_complete_time = 0
+        
+        self.relocation_routes = []
+        self.relocation_timestamps = []
 
 class Passenger:
     def __init__(self, data: dict) -> None:

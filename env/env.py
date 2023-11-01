@@ -1,3 +1,4 @@
+from ortools.linear_solver import pywraplp
 from ga.chromosome import Chromosome
 from typing import Tuple
 import geopandas as gpd
@@ -8,11 +9,13 @@ import sys
 try:
     from tools import *
     from object import *
+    from tools import _haversine
 except:
     sys.path.append('/home/happy956/relocation')
     sys.path.append('/home/happy956/relocation/env')
     from tools import *
     from object import *
+    from tools import _haversine
 
 class Env:
     def __init__(self, args: dict) -> None:
@@ -90,7 +93,11 @@ class Env:
                     poped_veh_id = [idx_ for idx_, veh_ in enumerate(self.curr_vehs[from_grid_id]) if veh_.veh_id == veh.veh_id][0]
                     veh = self.curr_vehs[from_grid_id].pop(poped_veh_id)
                     
-                    lat1, lon1, lat2, lon2 = veh.curr_lat, veh.curr_lon, od_data['lat_d'], od_data['lon_d']
+                    random_dest_index = np.random.choice(5, 1)[0]
+                    random_dest = od_data['random_points_d'][f'{random_dest_index}']
+                    lat_d, lon_d = random_dest['lat'], random_dest['lon']
+                    
+                    lat1, lon1, lat2, lon2 = veh.curr_lat, veh.curr_lon, lat_d, lon_d
                     routes, distance, duration = get_duration_distance((lon1, lat1, lon2, lat2), route=True)
                     if len(routes) == 0: raise
                     timestamp = get_timestamp(routes, self.current_time, duration)
@@ -104,65 +111,184 @@ class Env:
                     
                     veh.veh_state = 'not free'
                     veh.curr_grid = to_grid_id
-                    veh.curr_lat = od_data['lat_d']
-                    veh.curr_lon = od_data['lon_d']
+                    veh.curr_lat = lat_d
+                    veh.curr_lon = lon_d
                     veh.delay += duration
+                    veh.relocation_routes = routes
+                    veh.relocation_timestamps = timestamp
                     
                     self.curr_vehs[to_grid_id].append(veh)
-                    self.trip_data.append({
-                        'id': veh.veh_id,
-                        'type': 'veh',
-                        'state': 'relocation',
-                        'route': list(map(lambda x: x[::-1], routes)),
-                        'timestamp': timestamp
-                    })
+    
+    # def assign_veh_to_passenger(self) -> None:
+    #     for grid_id, veh_lst in self.curr_vehs.items():
+    #         filtered_veh_lst = list(filter(lambda x: x.veh_state == 'free' and x.delay == 0, veh_lst))
+    #         filtered_passenger_lst = list(filter(lambda x: x.passenger_state == 'call', self.curr_passengers[grid_id]))
+    #         if len(filtered_veh_lst) == 0 or len(filtered_passenger_lst) == 0: continue
+            
+    #         min_object_n = min(len(filtered_veh_lst), len(filtered_passenger_lst))
+    #         random_vehs = np.random.choice(filtered_veh_lst, size=min_object_n, replace=False)
+    #         random_passengers = np.random.choice(filtered_passenger_lst, size=min_object_n, replace=False)
+            
+    #         for veh, passenger in zip(random_vehs, random_passengers):
+    #             lat1, lon1, lat2, lon2 = veh.curr_lat, veh.curr_lon, passenger.init_ori_lat, passenger.init_ori_lon
+    #             routes, distance, duration = get_duration_distance((lon1, lat1, lon2, lat2), route=True)
+    #             if len(routes) == 0:
+    #                 raise
+    #             timestamp = get_timestamp(routes, self.current_time, duration)
+                
+    #             veh.veh_state = 'assigned'
+    #             veh.delay += duration
+    #             veh.assigned_passenger_id = passenger.passenger_id
+                
+    #             passenger.passenger_state = 'wait'
+    #             passenger.delay += duration
+    #             passenger.assigned_vehicle_id = veh.veh_id
+                
+    #             self.vehicle_point_data.append({
+    #                 'id': veh.veh_id,
+    #                 'type': 'veh',
+    #                 'location': [veh.curr_lat, veh.curr_lon],
+    #                 'duration': [veh.relocation_complete_time, self.current_time]
+    #             })
+                
+    #             self.passenger_point_data.append({
+    #                 'id': passenger.passenger_id,
+    #                 'type': 'passenger',
+    #                 'location': [passenger.init_ori_lat, passenger.init_ori_lon],
+    #                 'duration': [passenger.start_time, timestamp[-1]]
+    #             })
+                
+    #             self.trip_data.append({
+    #                 'id': veh.veh_id,r
+    #                 'type': 'veh',
+    #                 'state': 'assigned',
+    #                 'route': list(map(lambda x: x[::-1], routes)),
+    #                 'timestamp': timestamp
+    #             })
     
     def assign_veh_to_passenger(self) -> None:
-        for grid_id, veh_lst in self.curr_vehs.items():
-            filtered_veh_lst = list(filter(lambda x: x.veh_state == 'free' and x.delay == 0, veh_lst))
-            filtered_passenger_lst = list(filter(lambda x: x.passenger_state == 'call', self.curr_passengers[grid_id]))
-            if len(filtered_veh_lst) == 0 or len(filtered_passenger_lst) == 0: continue
+        vehicles = sum([veh_lst for veh_lst in self.curr_vehs.values()], [])
+        free_vehicles = list(filter(lambda x: x.veh_state == 'free' and x.delay == 0, vehicles))
+        relocating_vehicles = list(filter(lambda x: x.veh_state == 'not free', vehicles))
+        vehicles = free_vehicles + relocating_vehicles
+        
+        passengers = sum([passenger_lst for passenger_lst in self.curr_passengers.values()], [])
+        passengers = list(filter(lambda x: x.passenger_state == 'call', passengers))
+        
+        costs = []
+        pairs = []
+        for veh in vehicles:
+            cost_lst = []
+            pair_lst = []
+            for passenger in passengers:
+                cost = _haversine(veh.curr_lat, veh.curr_lon, passenger.init_ori_lat, passenger.init_ori_lon)
+                cost_lst.append(cost)
+                pair_lst.append({
+                    'veh_grid': veh.curr_grid,
+                    'veh_id': veh.veh_id,
+                    'passenger_grid': passenger.init_ori_grid,
+                    'passenger_id': passenger.passenger_id
+                })
+            costs.append(cost_lst)
+            pairs.append(pair_lst)
+        
+        costs = np.array(costs)
+        pairs = np.array(pairs)
+        
+        num_driver, num_passenger = costs.shape
+        if num_driver < num_passenger:
+            costs = costs.T
+            num_driver, num_passenger = num_passenger, num_driver
             
-            min_object_n = min(len(filtered_veh_lst), len(filtered_passenger_lst))
-            random_vehs = np.random.choice(filtered_veh_lst, size=min_object_n, replace=False)
-            random_passengers = np.random.choice(filtered_passenger_lst, size=min_object_n, replace=False)
-            
-            for veh, passenger in zip(random_vehs, random_passengers):
-                lat1, lon1, lat2, lon2 = veh.curr_lat, veh.curr_lon, passenger.init_ori_lat, passenger.init_ori_lon
-                routes, distance, duration = get_duration_distance((lon1, lat1, lon2, lat2), route=True)
-                if len(routes) == 0:
-                    raise
-                timestamp = get_timestamp(routes, self.current_time, duration)
+        solver = pywraplp.Solver.CreateSolver('SCIP')
+        
+        if not solver: raise
+        
+        result_matrix = {}
+        for i in range(num_driver):
+            for j in range(num_passenger):
+                result_matrix[i, j] = solver.IntVar(0, 1, '')
+        
+        for i in range(num_driver):
+            solver.Add(solver.Sum([result_matrix[i, j] for j in range(num_passenger)]) <= 1)
+        for j in range(num_passenger):
+            solver.Add(solver.Sum([result_matrix[i, j] for i in range(num_driver)]) == 1)
+        
+        objective_terms = []
+        for i in range(num_driver):
+            for j in range(num_passenger):
+                objective_terms.append(costs[i][j] * result_matrix[i, j])
+        
+        solver.Minimize(solver.Sum(objective_terms))
+        status = solver.Solve()
+        
+        if status == pywraplp.Solver.OPTIMAL or status == pywraplp.Solver.FEASIBLE:
+            for i in range(num_driver):
+                for j in range(num_passenger):
+                    if result_matrix[i, j].solution_value() > 0.5:
+                        veh_grid = pairs[i, j]['veh_grid']
+                        veh_id = pairs[i, j]['veh_id']
+                        passenger_grid = pairs[i, j]['passenger_grid']
+                        passenger_id = pairs[i, j]['passenger_id']
+
+                        veh = list(filter(lambda x: x.veh_id == veh_id, self.curr_vehs[veh_grid]))[0]
+                        passenger = list(filter(lambda x: x.passenger_id == passenger_id, self.curr_passengers[passenger_grid]))[0]
+                        
+                        if veh.veh_state == 'not free':
+                            veh_last_indices = [idx for idx, t in enumerate(veh.relocation_timestamps) if t >= self.current_time]
+                            veh_last_index = list(sorted(veh_last_indices))[0]
+                            last_lat, last_lon = veh.relocation_routes[veh_last_index]
+                            veh.curr_lat, veh.curr_lon = last_lat, last_lon
+                            veh.delay = 0
+                            veh.relocation_complete_time = veh.relocation_timestamps[veh_last_index]
+                            
+                            self.trip_data.append({
+                                'id': veh.veh_id,
+                                'type': 'veh',
+                                'state': 'relocation',
+                                'route': list(map(lambda x: x[::-1], veh.relocation_routes[:veh_last_index])),
+                                'timestamp': veh.relocation_timestamps[:veh_last_index]
+                            })
+                        
+                            veh.relocation_routes = []
+                            veh.relocation_timestamps = []
+                        
+                        lat1, lon1, lat2, lon2 = veh.curr_lat, veh.curr_lon, passenger.init_ori_lat, passenger.init_ori_lon
+                        routes, distance, duration = get_duration_distance((lon1, lat1, lon2, lat2), route=True)
+                        if len(routes) == 0: raise
+                        
+                        timestamp = get_timestamp(routes, self.current_time, duration)
+                        
+                        veh.veh_state = 'assigned'
+                        veh.delay += duration
+                        veh.assigned_passenger_id = passenger.passenger_id
+                        
+                        passenger.passenger_state = 'wait'
+                        passenger.delay += duration
+                        passenger.assigned_vehicle_id = veh.veh_id
                 
-                veh.veh_state = 'assigned'
-                veh.delay += duration
-                veh.assigned_passenger_id = passenger.passenger_id
-                
-                passenger.passenger_state = 'wait'
-                passenger.delay += duration
-                passenger.assigned_vehicle_id = veh.veh_id
-                
-                self.vehicle_point_data.append({
-                    'id': veh.veh_id,
-                    'type': 'veh',
-                    'location': [veh.curr_lat, veh.curr_lon],
-                    'duration': [veh.relocation_complete_time, self.current_time]
-                })
-                
-                self.passenger_point_data.append({
-                    'id': passenger.passenger_id,
-                    'type': 'passenger',
-                    'location': [passenger.init_ori_lat, passenger.init_ori_lon],
-                    'duration': [passenger.start_time, timestamp[-1]]
-                })
-                
-                self.trip_data.append({
-                    'id': veh.veh_id,
-                    'type': 'veh',
-                    'state': 'assigned',
-                    'route': list(map(lambda x: x[::-1], routes)),
-                    'timestamp': timestamp
-                })
+                        self.vehicle_point_data.append({
+                            'id': veh.veh_id,
+                            'type': 'veh',
+                            'location': [veh.curr_lat, veh.curr_lon],
+                            'duration': [veh.relocation_complete_time, self.current_time]
+                        })
+                        
+                        self.passenger_point_data.append({
+                            'id': passenger.passenger_id,
+                            'type': 'passenger',
+                            'location': [passenger.init_ori_lat, passenger.init_ori_lon],
+                            'duration': [passenger.start_time, timestamp[-1]]
+                        })
+                        
+                        self.trip_data.append({
+                            'id': veh.veh_id,
+                            'type': 'veh',
+                            'state': 'assigned',
+                            'route': list(map(lambda x: x[::-1], routes)),
+                            'timestamp': timestamp
+                        })
+        else: raise
     
     def go_to_destination(self) -> None:
         for grid_id, veh_lst in self.curr_vehs.items():
@@ -228,6 +354,13 @@ class Env:
                 if veh.delay == 0 and veh.veh_state == 'not free':
                     veh.veh_state = 'free'
                     veh.relocation_complete_time = self.current_time
+                    self.trip_data.append({
+                        'id': veh.veh_id,
+                        'type': 'veh',
+                        'state': 'relocation',
+                        'route': list(map(lambda x: x[::-1], veh.relocation_routes)),
+                        'timestamp': veh.relocation_timestamps
+                    })
 
         ### append passenger in passenger_pool
         curr_passenger_id_lst = [passenger.passenger_id for passenger_lst in self.curr_passengers.values() for passenger in passenger_lst]
@@ -294,6 +427,8 @@ class Env:
                 'lon_d': od['lon_d'],
                 'dist': od['distance'],
                 'time': od['duration'],
+                'random_points_o': od['random_points_o'],
+                'random_points_d': od['random_points_d'],
             }
             
         if self.use_random_data:

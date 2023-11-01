@@ -1,5 +1,5 @@
-from shapely.geometry import Point, Polygon, MultiLineString
-from typing import Union, Literal, Tuple, Callable
+from shapely.geometry import Point, MultiPoint, LineString, Polygon, MultiLineString
+from typing import Union, Literal, List, Tuple, Callable
 from shapely.prepared import prep
 from itertools import accumulate
 from pyproj import Transformer
@@ -28,6 +28,7 @@ def generate_grid(place_name: str, unit: str, unit_size: int) -> None:
     else:
         if unit == 'km':
             unit_size *= 1000
+        
         grids = _partition(region_geometry, bbox_meter, transformer, unit_size)
         grid_gdf = gpd.GeoDataFrame(grids, columns=['geometry'])
         
@@ -38,8 +39,9 @@ def generate_grid(place_name: str, unit: str, unit_size: int) -> None:
         
         edges = MultiLineString(edge_geometry)
         grids = grid_gdf['geometry']
-        intersectios_grids = grids.map(lambda x: x.intersection(edges))
-        grid_gdf = grid_gdf[~intersectios_grids.map(lambda x: x.is_empty)].reset_index(drop=True).reset_index()
+        filtered_grids = grids.map(lambda grid: _filter_grid(grid, edges, transformer))
+        grid_gdf = grid_gdf[filtered_grids].reset_index(drop=True).reset_index()
+        grid_gdf['random_points'] = grid_gdf['geometry'].map(lambda grid: _get_random_points(grid, edges, transformer))
         grid_gdf.to_file('data/grid.json')
 
 def generate_od_matrix() -> None:
@@ -62,17 +64,20 @@ def generate_random_data(place_name: str, n_point: int, network_type: str) -> No
     custom_filter = '["highway"~"primary|secondary|tertiary"]'
     graph = ox.graph_from_place(place_name, network_type=network_type, custom_filter=custom_filter)
     edges = ox.graph_to_gdfs(graph, nodes=False)
-    edge_geometry = edges.reset_index()['geometry'].tolist()
+    point_geometry = MultiPoint([point for edge in edges.reset_index()['geometry'].tolist() for point in list(edge.coords)])
     
     data = []
     grids = gpd.read_file('data/grid.json')
     grids = {grid['index']:grid['geometry'] for grid in grids.to_dict('records')}
     data_type = 'vehicle' if network_type == 'drive' else 'passenger'
     
+    filtered_point_geometry = list(map(lambda grid: grid.intersection(point_geometry), grids.values()))
+    filtered_point_geometry = [point for multi_point in filtered_point_geometry for point in multi_point.geoms]
+    
     if data_type == 'vehicle':
         for n in range(n_point):
-            random_linestring = random.choice(edge_geometry)
-            lon, lat = random.choice(list(random_linestring.coords))
+            random_point = random.choice(filtered_point_geometry)
+            lon, lat = list(random_point.coords)[0]
             data.append({
                 'id': n,
                 'start_time': random.choice(range(1)),
@@ -83,12 +88,12 @@ def generate_random_data(place_name: str, n_point: int, network_type: str) -> No
     
     elif data_type == 'passenger':
         for n in range(n_point):
-            random_linestring = random.choice(edge_geometry)
-            lon, lat = random.choice(list(random_linestring.coords))
+            random_point = random.choice(filtered_point_geometry)
+            lon, lat = list(random_point.coords)[0]
             
             while 1:
-                random_linestring_ = random.choice(edge_geometry)
-                dest_lon, dest_lat = random.choice(list(random_linestring_.coords))
+                random_point_ = random.choice(filtered_point_geometry)
+                dest_lon, dest_lat = list(random_point_.coords)[0]
                 if _haversine(lat, lon, dest_lat, dest_lon) > 5:
                     data.append({
                         'id': n,
@@ -101,6 +106,7 @@ def generate_random_data(place_name: str, n_point: int, network_type: str) -> No
                         'dest_lon': dest_lon
                     })
                     break
+    
     result_df = pd.DataFrame(data)
     result_df.to_json(f'data/random_{data_type}.json', 'records')
 
@@ -160,12 +166,49 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     distance_km = km_constant * c
     return distance_km
 
+def _filter_grid(grid: Polygon, edges: MultiLineString, transformer: Callable) -> bool:
+    # 1. 링크가 없는 격자 제거
+    result = grid.intersection(edges)
+    if result.is_empty: return False
+    
+    # 2. 격자별 링크 길이 합이 1km 미만인 격자 제거
+    if isinstance(result, LineString):
+        total_link_length = LineString([transformer(x, y) for x, y in list(result.coords)]).length
+    else:
+        total_link_length = sum([LineString([transformer(x, y) for x, y in list(link.coords)]).length for link in result.geoms])
+    
+    if total_link_length < 1000:
+        return False
+    return True
+
 def _find_grid_id(point: Union[list, tuple], grids: dict) -> int:
     for grid_id, grid in grids.items():
         p = Point(point)
         if not grid.intersection(p).is_empty:
             return grid_id
     raise
+
+def _get_random_points(grid: Polygon, edges: MultiLineString, transformer: Callable, n: int = 5, meter: int = 10) -> List[dict]:
+    result = edges.intersection(grid)
+    
+    ### 격자에 존재하는 링크들을 지정한 meter로 분할한 위치 생성
+    points = []
+    for link in result.geoms:
+        link_5179 = [transformer(x, y) for x, y in list(link.coords)]
+        linestring = LineString(link_5179)
+        new_points = list(ox.utils_geo.interpolate_points(linestring, meter))[1:-1]
+        points.extend(new_points)
+    
+    ### 격자에 생성된 위치 중 지정한 수만큼 추출
+    random_points = {}
+    random_indices = np.random.choice(len(points), size=n, replace=False)
+    for i, idx in enumerate(random_indices):
+        lon, lat = transformer(*points[idx], direction='INVERSE')
+        random_points[i] = {
+            'lat': lat,
+            'lon': lon
+        }
+    return random_points
 
 def _request_osrm(point: Union[list, tuple]) -> dict:
     try:
@@ -176,3 +219,14 @@ def _request_osrm(point: Union[list, tuple]) -> dict:
         print(point)
         raise
     return info
+
+if __name__ == '__main__':
+    import time
+    
+    s_t_1 = time.time()
+    generate_random_data('대전, 대한민국', 300, 'drive')
+    e_t_1 = time.time()
+    print(e_t_1 - s_t_1)
+    generate_random_data('대전, 대한민국', 5000, 'walk')
+    e_t_2 = time.time()
+    print(e_t_2 - e_t_1)
