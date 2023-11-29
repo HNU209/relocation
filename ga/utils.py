@@ -115,26 +115,6 @@ def next_generation(population: list, population_size: int, mutation_rate: float
 
 def crossing_correction(pop: Chromosome) -> Chromosome:
     matrix_len = pop.matrix.shape[0]
-    check = []
-    for idx_i in range(matrix_len):
-        for idx_j in range(matrix_len):
-            if idx_i == idx_j or (idx_i, idx_j) in check or (idx_j, idx_i) in check: continue
-            else:
-                check.append((idx_i, idx_j))
-                check.append((idx_j, idx_i))
-                
-                grid_1 = pop.matrix[idx_i, idx_j]
-                grid_2 = pop.matrix[idx_j, idx_i]
-                
-                if grid_1 == 0 or grid_2 == 0: continue
-                else:
-                    min_vehs = min(grid_1, grid_2)
-                    pop.matrix[idx_i, idx_j] -= min_vehs
-                    pop.matrix[idx_j, idx_i] -= min_vehs
-    return pop
-
-def crossing_correction(pop: Chromosome) -> Chromosome:
-    matrix_len = pop.matrix.shape[0]
     
     for i in range(matrix_len):
         for j in range(i, matrix_len):
